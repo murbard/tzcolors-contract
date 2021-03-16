@@ -173,14 +173,14 @@ class TZColorsFA2(sp.Contract):
 
     @sp.entry_point
     def transfer(self, batch_transfers):
-        sp.verify(sp.sender == self.data.initial_auction_house_address)
         sp.set_type(batch_transfers, BatchTransfer.get_type())
         sp.for transfer in batch_transfers:
            sp.for tx in transfer.txs:
                 sp.if (tx.amount > sp.nat(0)):
                     from_user = LedgerKey.make(transfer.from_, tx.token_id)
                     to_user = LedgerKey.make(tx.to_, tx.token_id)
-
+                    sp.if self.data.royalty_params.contains(tx.token_id):
+                        sp.verify(sp.sender == self.data.initial_auction_house_address)
                     sp.verify((self.data.ledger.get(from_user,sp.nat(0)) >= tx.amount), message = FA2ErrorMessage.INSUFFICIENT_BALANCE)
 
                     operator_user = AllowanceKey.make(transfer.from_, sp.sender, tx.token_id)
