@@ -33,7 +33,7 @@ class BatchTransfer:
     def item(from_, txs):
         return sp.set_type_expr(sp.record(from_ = from_, txs = txs), BatchTransfer.get_transfer_type())
 
-    
+
 class BalanceOfRequest:
     def get_response_type():
         return sp.TList(
@@ -53,7 +53,7 @@ class Royalty:
 
     def make(recipient, fraction):
         return sp.set_type_expr(sp.record(recipient = recipient, fraction = fraction), Royalty.get_type())
-    
+
 class AllowanceKey:
     def get_type():
         return sp.TRecord(owner = sp.TAddress, operator = sp.TAddress, token_id = sp.TNat).layout(("owner", ("operator","token_id")))
@@ -73,7 +73,7 @@ class BatchInitialAuction:
     def get_type():
         return sp.TRecord(
             auction_id_start = sp.TNat,
-            token_ids = sp.TList(sp.TNat)            
+            token_ids = sp.TList(sp.TNat)
         ).layout(
             ("auction_id_start","token_ids")
             )
@@ -90,6 +90,7 @@ class AuctionErrorMessage:
     TOKEN_AMOUNT_TOO_LOW = "{}TOKEN_AMOUNT_TOO_LOW".format(PREFIX)
     END_DATE_TOO_SOON = "{}END_DATE_TOO_SOON".format(PREFIX)
     END_DATE_TOO_LATE = "{}END_DATE_TOO_LATE".format(PREFIX)
+    ONLY_ROYALTY_RECIPIENT_CAN_EDIT_RECIPIENT = "{}ONLY_ROYALTY_RECIPIENT_CAN_EDIT_RECIPIENT".format(PREFIX)
 
 class Auction():
     def get_type():
@@ -135,7 +136,6 @@ class TZColorsFA2(sp.Contract):
             allowances = sp.big_map(tkey=AllowanceKey.get_type(), tvalue=sp.TBool),
             minter = minter,
             token_royalty = sp.big_map(tkey=sp.TNat, tvalue=sp.TUnit),
-            accumulated_royalties = sp.big_map(tkey=sp.TAddress, tvalue=sp.TMutez)
         )
 
     # TODO replace initial_auction with a mint function that can only be called by an admin
@@ -179,7 +179,7 @@ class TZColorsFA2(sp.Contract):
             register_token = sp.contract(None, self.data.initial_auction_house_address,
                                          entry_point = "register_token").open_some()
             sp.transfer(sp.record(token_id = token_id, royalty = royalty), sp.tez(0), register_token)
-            
+
     @sp.entry_point
     def update_operators(self, update_operator_requests):
         sp.set_type(update_operator_requests,UpdateOperatorsRequest.get_type())
@@ -228,18 +228,48 @@ class TZColorsFA2(sp.Contract):
 
         sp.transfer(responses.value, sp.mutez(0), balance_of_request.callback)
 
-# TODO : add royalty params and royalty collect bigmaps to the auction house
+
+
+
+
+
+
+
+
+
+"""
+
+
+AUCTION HOUSE CONTRACT
+
+
+"""
 class AuctionHouse(sp.Contract):
     def __init__(self):
         self.init(
             auctions=sp.big_map(tkey=sp.TNat, tvalue = Auction.get_type()),
             token_royalty=sp.big_map(
-                tkey=sp.TRecord(address = sp.TAddress, token_id = sp.TNat), tvalue=Royalty.get_type()))
+                tkey=sp.TRecord(address = sp.TAddress, token_id = sp.TNat), tvalue=Royalty.get_type()),
+            accumulated_royalties = sp.big_map(tkey=sp.TAddress, tvalue=sp.TMutez)
+        )
 
     @sp.entry_point
     def register_token(self, token_id, royalty):
         self.data.token_royalty[sp.record(address = sp.sender, token_id = token_id)] = royalty
-        
+
+    @sp.entry_point
+    def collect_royalties(self, to_):
+        amt = self.data.accumulated_royalties[sp.sender]
+        self.data.accumulated_royalties[sp.sender] = sp.tez(0)
+        sp.send(to_, amt)
+
+    @sp.entry_point
+    def update_royalty_recipient(self, fa2_address, token_id, new_recipient):
+        key = sp.compute(sp.record(address = fa2_address, token_id = token_id))
+        royalty = self.data.token_royalty[key]
+        sp.verify(royalty.recipient == sp.sender, AuctionErrorMessage.ONLY_ROYALTY_RECIPIENT_CAN_EDIT_RECIPIENT)
+        royalty.recipient = new_recipient
+
     @sp.entry_point
     def create_auction(self, create_auction_request):
         sp.set_type_expr(create_auction_request, AuctionCreateRequest.get_type())
@@ -274,20 +304,32 @@ class AuctionHouse(sp.Contract):
             auction.end_timestamp = sp.now.add_seconds(AUCTION_EXTENSION_THRESHOLD)
         self.data.auctions[auction_id] = auction
 
+
+
     @sp.entry_point
     def withdraw(self, auction_id):
         sp.set_type_expr(auction_id, sp.TNat)
         auction = self.data.auctions[auction_id]
 
         sp.verify(sp.now>auction.end_timestamp,message=AuctionErrorMessage.AUCTION_IS_ONGOING)
-
         token_contract = sp.contract(BatchTransfer.get_type(), auction.token_address, entry_point = "transfer").open_some()
-
+        
         sp.if auction.bidder != auction.seller:
+            seller_portion = sp.local("seller_portion", auction.bid_amount)
+            rkey = sp.compute(sp.record(
+            address = auction.token_address, token_id = auction.token_id))
+            sp.if self.data.token_royalty.contains(rkey):
+                royalty_data =  self.data.token_royalty[rkey]
+                royalty_payment = sp.split_tokens(auction.bid_amount, royalty_data.fraction, 1 << 32)
+                seller_portion.value -= royalty_payment
+                sp.if ~self.data.accumulated_royalties.contains(royalty_data.recipient):
+                    self.data.accumulated_royalties[royalty_data.recipient] = royalty_payment
+                sp.else:
+                   self.data.accumulated_royalties[royalty_data.recipient] += royalty_payment
             sp.if auction.seller>THRESHOLD_ADDRESS:
-               sp.send(DEFAULT_ADDRESS, auction.bid_amount)
+               sp.send(DEFAULT_ADDRESS, seller_portion.value)
             sp.else:
-               sp.send(auction.seller, auction.bid_amount)
+               sp.send(auction.seller, seller_portion.value)
 
         sp.transfer([BatchTransfer.item(sp.self_address,[sp.record(to_=auction.bidder, token_id=auction.token_id, amount=auction.token_amount)])], sp.mutez(0), token_contract)
         del self.data.auctions[auction_id]
@@ -389,8 +431,8 @@ def test():
 
     scenario.p("Auction house can transfer Bob's token after allowance")
     scenario += fa2.update_operators([sp.variant('add_operator', sp.record(owner=bob.address,operator=auction_house.address,token_id=0))]).run(sender=bob)
-    scenario += fa2.transfer([BatchTransfer.item(bob.address, [sp.record(to_=alice.address, token_id=0, amount=1)])]).run(sender=auction_house.address)    
-    
+    scenario += fa2.transfer([BatchTransfer.item(bob.address, [sp.record(to_=alice.address, token_id=0, amount=1)])]).run(sender=auction_house.address)
+
 
     scenario.p("Bob cannot transfer more token")
     auction_id = sp.nat(0) # we can reuse 0
@@ -403,4 +445,3 @@ def test():
     scenario.p("Alice can transfer as owner")
     auction_id = sp.nat(0) # we can reuse 0
     scenario += fa2.transfer([BatchTransfer.item(alice.address, [sp.record(to_=dan.address, token_id=0, amount=1)])]).run(sender=alice)
-
