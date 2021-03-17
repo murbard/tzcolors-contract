@@ -138,34 +138,6 @@ class TZColorsFA2(sp.Contract):
             token_royalty = sp.big_map(tkey=sp.TNat, tvalue=sp.TUnit),
         )
 
-    # TODO replace initial_auction with a mint function that can only be called by an admin
-    # + entry point for admin to change their own address (two steps, accept)
-    # pass the metadata + royalty info when minting
-    # push royalty param to the auction house
-    # @sp.entry_point
-    # def initial_auction(self, batch_initial_auction):
-    #     auction_id_runner = sp.local('auction_id_runner', batch_initial_auction.auction_id_start)
-    #     sp.for token_id in batch_initial_auction.token_ids:
-    #         sp.verify((~self.data.total_supply.contains(token_id)), message = FA2ErrorMessage.NOT_OWNER)
-    #         sp.verify(token_id<=MAXIMAL_TOKEN_ID, message = FA2ErrorMessage.NOT_OWNER)
-    #         to_user = LedgerKey.make(sp.self_address, token_id)
-    #         self.data.ledger[to_user] = sp.nat(1)
-    #         self.data.total_supply[token_id] = sp.nat(1)
-    #         operator_user = AllowanceKey.make(sp.self_address, self.data.initial_auction_house_address, token_id)
-    #         self.data.allowances[operator_user] = True
-    #         auction_house = sp.contract(AuctionCreateRequest.get_type(), self.data.initial_auction_house_address, entry_point = "create_auction").open_some()
-    #         auction_create_request = sp.record(
-    #             auction_id=auction_id_runner.value,
-    #             token_address=sp.self_address,
-    #             token_id=token_id,
-    #             token_amount=sp.nat(1),
-    #             end_timestamp=sp.now.add_hours(INITIAL_AUCTION_DURATION),
-    #             bid_amount=INITIAL_BID
-    #         )
-    #         sp.set_type_expr(auction_create_request, AuctionCreateRequest.get_type())
-    #         sp.transfer(auction_create_request, sp.mutez(0), auction_house)
-    #         auction_id_runner.value += 1
-
     @sp.entry_point
     def mint(self, token_id, royalty, metadata):
         sp.set_type(royalty, sp.TOption(Royalty.get_type()))
@@ -227,14 +199,6 @@ class TZColorsFA2(sp.Contract):
             responses.value.push(sp.record(request = request, balance = self.data.ledger.get(LedgerKey.make(request.owner, request.token_id),0)))
 
         sp.transfer(responses.value, sp.mutez(0), balance_of_request.callback)
-
-
-
-
-
-
-
-
 
 
 """
@@ -303,8 +267,6 @@ class AuctionHouse(sp.Contract):
         sp.if auction.end_timestamp-sp.now < AUCTION_EXTENSION_THRESHOLD:
             auction.end_timestamp = sp.now.add_seconds(AUCTION_EXTENSION_THRESHOLD)
         self.data.auctions[auction_id] = auction
-
-
 
     @sp.entry_point
     def withdraw(self, auction_id):
