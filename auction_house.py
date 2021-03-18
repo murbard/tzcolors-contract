@@ -46,10 +46,9 @@ class BalanceOfRequest:
             callback = sp.TContract(BalanceOfRequest.get_response_type())
         ).layout(("requests", "callback"))
 
-# TODO: specify layout
 class Royalty:
     def get_type():
-        return sp.TRecord(recipient = sp.TAddress, fraction = sp.TNat)
+        return sp.TRecord(recipient = sp.TAddress, fraction = sp.TNat).layout(("recipient", "fraction"))
 
     def make(recipient, fraction):
         return sp.set_type_expr(sp.record(recipient = recipient, fraction = fraction), Royalty.get_type())
@@ -60,24 +59,6 @@ class AllowanceKey:
 
     def make(owner, operator, token_id):
         return sp.set_type_expr(sp.record(owner = owner, operator = operator, token_id = token_id), AllowanceKey.get_type())
-
-class BatchApprove:
-    def get_type():
-        return sp.TList(sp.TRecord(operator = sp.TAddress,
-                             token_id = sp.TNat,
-                             amount = sp.TNat).layout(
-                ("operator", ("token_id", "amount"))
-            ))
-
-class BatchInitialAuction:
-    def get_type():
-        return sp.TRecord(
-            auction_id_start = sp.TNat,
-            token_ids = sp.TList(sp.TNat)
-        ).layout(
-            ("auction_id_start","token_ids")
-            )
-
 
 class AuctionErrorMessage:
     PREFIX = "AUC_"
@@ -98,7 +79,7 @@ class Auction():
 
 class AuctionCreateRequest():
     def get_type():
-        return sp.TRecord(auction_id=sp.TNat,token_address=sp.TAddress, token_id=sp.TNat, token_amount=sp.TNat,  end_timestamp=sp.TTimestamp,  bid_amount=sp.TMutez)#.layout(("auction_id",("token_address",("token_id",("token_amount",("end_timestamp","bid_amount"))))))
+        return sp.TRecord(auction_id=sp.TNat,token_address=sp.TAddress, token_id=sp.TNat, token_amount=sp.TNat,  end_timestamp=sp.TTimestamp,  bid_amount=sp.TMutez).layout(("auction_id",("token_address",("token_id",("token_amount",("end_timestamp","bid_amount"))))))
 
 class UpdateOperatorsRequest():
     def get_operator_param_type():
@@ -114,6 +95,11 @@ class UpdateOperatorsRequest():
                     remove_operator = UpdateOperatorsRequest.get_operator_param_type())
         )
 
+class TokenMetadata():
+    def get_type():
+        return sp.TRecord(
+                    token_id=sp.TNat, token_info=sp.TMap(k = sp.TString, v= sp.TBytes)).layout(("token_id", "token_info"))
+
 INITIAL_BID = sp.mutez(900000)
 MINIMAL_BID = sp.mutez(100000)
 INITIAL_AUCTION_DURATION = sp.int(24*5)
@@ -125,32 +111,36 @@ DEFAULT_ADDRESS = sp.address("tz1RKmJwoAiaqFdjQYSbFy1j7u7UhEFsqXq7")
 AUCTION_EXTENSION_THRESHOLD = sp.int(60*5) # 5 minutes
 BID_STEP_THRESHOLD = sp.mutez(100000)
 
-class TZColorsFA2(sp.Contract):
+class AcuteArtFA2(sp.Contract):
     def __init__(self, initial_auction_house_address, minter):
         self.init(
             initial_auction_house_address = initial_auction_house_address,
             ledger = sp.big_map(tkey=LedgerKey.get_type(), tvalue=sp.TNat),
-            token_metadata = sp.big_map(tkey=sp.TNat, tvalue=sp.TRecord(
-                    token_id=sp.TNat, token_info=sp.TMap(k = sp.TString, v= sp.TBytes))),
+            token_metadata = sp.big_map(tkey=sp.TNat, tvalue=TokenMetadata.get_type()),
             total_supply=sp.big_map(tkey=sp.TNat, tvalue=sp.TNat),
             allowances = sp.big_map(tkey=AllowanceKey.get_type(), tvalue=sp.TBool),
             minter = minter,
-            token_royalty = sp.big_map(tkey=sp.TNat, tvalue=sp.TUnit),
+            token_royalties = sp.big_map(tkey=sp.TNat, tvalue=sp.TUnit),
         )
 
     @sp.entry_point
     def mint(self, token_id, royalty, metadata):
+        sp.set_type(token_id, sp.TNat)
         sp.set_type(royalty, sp.TOption(Royalty.get_type()))
+        sp.set_type(metadata, sp.TBytes)
+        
         sp.verify(sp.sender == self.data.minter, message = FA2ErrorMessage.ONLY_MINTER_CAN_MINT)
         sp.verify(~self.data.total_supply.contains(token_id), message = FA2ErrorMessage.TOKEN_ALREADY_EXISTS)
+        
+        minter_ledger_key = LedgerKey.make(self.data.minter, token_id)
         self.data.total_supply[token_id] = 1
-        self.data.ledger[sp.record(owner = self.data.minter, token_id = token_id)] = 1
+        self.data.ledger[minter_ledger_key] = 1
         self.data.token_metadata[token_id] = sp.record(token_id = token_id, token_info = {"" : metadata})
+        
         sp.if royalty.is_some():
-            self.data.token_royalty[token_id] = sp.unit
-            register_token = sp.contract(None, self.data.initial_auction_house_address,
-                                         entry_point = "register_token").open_some()
-            sp.transfer(sp.record(token_id = token_id, royalty = royalty), sp.tez(0), register_token)
+            self.data.token_royalties[token_id] = sp.unit
+            register_token = sp.contract(sp.TRecord(token_id=sp.TNat, royalty=Royalty.get_type()), self.data.initial_auction_house_address, entry_point = "register_token").open_some()
+            sp.transfer(sp.record(token_id = token_id, royalty = royalty.open_some()), sp.tez(0), register_token)
 
     @sp.entry_point
     def update_operators(self, update_operator_requests):
@@ -174,7 +164,7 @@ class TZColorsFA2(sp.Contract):
                 sp.if (tx.amount > sp.nat(0)):
                     from_user = LedgerKey.make(transfer.from_, tx.token_id)
                     to_user = LedgerKey.make(tx.to_, tx.token_id)
-                    sp.if self.data.token_royalty.contains(tx.token_id):
+                    sp.if self.data.token_royalties.contains(tx.token_id):
                         sp.verify(sp.sender == self.data.initial_auction_house_address)
                     sp.verify((self.data.ledger.get(from_user,sp.nat(0)) >= tx.amount), message = FA2ErrorMessage.INSUFFICIENT_BALANCE)
 
@@ -199,8 +189,6 @@ class TZColorsFA2(sp.Contract):
             responses.value.push(sp.record(request = request, balance = self.data.ledger.get(LedgerKey.make(request.owner, request.token_id),0)))
 
         sp.transfer(responses.value, sp.mutez(0), balance_of_request.callback)
-
-
 """
 
 
@@ -212,31 +200,41 @@ class AuctionHouse(sp.Contract):
     def __init__(self):
         self.init(
             auctions=sp.big_map(tkey=sp.TNat, tvalue = Auction.get_type()),
-            token_royalty=sp.big_map(
-                tkey=sp.TRecord(address = sp.TAddress, token_id = sp.TNat), tvalue=Royalty.get_type()),
+            token_royalties=sp.big_map(
+                tkey=LedgerKey.get_type(), tvalue=Royalty.get_type()),
             accumulated_royalties = sp.big_map(tkey=sp.TAddress, tvalue=sp.TMutez)
         )
 
     @sp.entry_point
     def register_token(self, token_id, royalty):
-        self.data.token_royalty[sp.record(address = sp.sender, token_id = token_id)] = royalty
+        sp.set_type(token_id, sp.TNat)
+        sp.set_type(royalty, Royalty.get_type())
+        
+        self.data.token_royalties[LedgerKey.make(sp.sender, token_id)] = royalty
 
     @sp.entry_point
     def collect_royalties(self, to_):
-        amt = self.data.accumulated_royalties[sp.sender]
-        self.data.accumulated_royalties[sp.sender] = sp.tez(0)
-        sp.send(to_, amt)
+        sp.set_type(to_, sp.TAddress)
+        accumulated_royalties = self.data.accumulated_royalties[sp.sender]
+        
+        sp.send(to_, accumulated_royalties)
+        
+        del self.data.accumulated_royalties[sp.sender]
 
     @sp.entry_point
     def update_royalty_recipient(self, fa2_address, token_id, new_recipient):
-        key = sp.compute(sp.record(address = fa2_address, token_id = token_id))
-        royalty = self.data.token_royalty[key]
+        sp.set_type(fa2_address, sp.TAddress)
+        sp.set_type(token_id, sp.TNat)
+        sp.set_type(new_recipient, sp.TAddress)
+        
+        royalty = self.data.token_royalties[LedgerKey.make(fa2_address, token_id)]
         sp.verify(royalty.recipient == sp.sender, AuctionErrorMessage.ONLY_ROYALTY_RECIPIENT_CAN_EDIT_RECIPIENT)
         royalty.recipient = new_recipient
 
     @sp.entry_point
     def create_auction(self, create_auction_request):
-        sp.set_type_expr(create_auction_request, AuctionCreateRequest.get_type())
+        sp.set_type(create_auction_request, AuctionCreateRequest.get_type())
+        
         token_contract = sp.contract(BatchTransfer.get_type(), create_auction_request.token_address, entry_point = "transfer").open_some()
         sp.verify(create_auction_request.token_amount > 0, message=AuctionErrorMessage.TOKEN_AMOUNT_TOO_LOW)
         sp.verify(create_auction_request.end_timestamp  >= sp.now.add_hours(MINIMAL_AUCTION_DURATION), message=AuctionErrorMessage.END_DATE_TOO_SOON)
@@ -249,7 +247,7 @@ class AuctionHouse(sp.Contract):
 
     @sp.entry_point
     def bid(self, auction_id):
-        sp.set_type_expr(auction_id, sp.TNat)
+        sp.set_type(auction_id, sp.TNat)
         auction = self.data.auctions[auction_id]
 
         sp.verify(sp.sender!=auction.seller, message=AuctionErrorMessage.SELLER_CANNOT_BID)
@@ -270,7 +268,7 @@ class AuctionHouse(sp.Contract):
 
     @sp.entry_point
     def withdraw(self, auction_id):
-        sp.set_type_expr(auction_id, sp.TNat)
+        sp.set_type(auction_id, sp.TNat)
         auction = self.data.auctions[auction_id]
 
         sp.verify(sp.now>auction.end_timestamp,message=AuctionErrorMessage.AUCTION_IS_ONGOING)
@@ -278,10 +276,9 @@ class AuctionHouse(sp.Contract):
         
         sp.if auction.bidder != auction.seller:
             seller_portion = sp.local("seller_portion", auction.bid_amount)
-            rkey = sp.compute(sp.record(
-            address = auction.token_address, token_id = auction.token_id))
-            sp.if self.data.token_royalty.contains(rkey):
-                royalty_data =  self.data.token_royalty[rkey]
+            token_address_ledger_key = LedgerKey.make(auction.token_address, auction.token_id)
+            sp.if self.data.token_royalties.contains(token_address_ledger_key):
+                royalty_data =  self.data.token_royalties[token_address_ledger_key]
                 royalty_payment = sp.split_tokens(auction.bid_amount, royalty_data.fraction, 1 << 32)
                 seller_portion.value -= royalty_payment
                 sp.if ~self.data.accumulated_royalties.contains(royalty_data.recipient):
@@ -315,8 +312,8 @@ def test():
     auction_house = AuctionHouse()
     scenario += auction_house
 
-    scenario.h2("TZColorsFA2")
-    fa2 = TZColorsFA2(auction_house.address, minter.address)
+    scenario.h2("AcuteArtFA2")
+    fa2 = AcuteArtFA2(auction_house.address, minter.address)
     scenario += fa2
 
     scenario.h2("Initial minting")
@@ -407,3 +404,56 @@ def test():
     scenario.p("Alice can transfer as owner")
     auction_id = sp.nat(0) # we can reuse 0
     scenario += fa2.transfer([BatchTransfer.item(alice.address, [sp.record(to_=dan.address, token_id=0, amount=1)])]).run(sender=alice)
+    
+    
+    scenario.h2("Royalties Mechanics")
+    auction_id = sp.nat(1)
+    fraction = sp.nat(215000000) # 215000000/2**32 ~= 5%
+    token_id = sp.nat(10)
+    
+    scenario.p("Minter mints token 10 with royalty")
+    scenario += fa2.mint(token_id = token_id, royalty = sp.some(sp.record(recipient=minter.address, fraction=fraction)), metadata = sp.bytes_of_string('ipfs://foo')).run(sender = minter.address)
+
+    scenario.p("Minter fails to send token to Bob")
+    scenario += fa2.transfer([BatchTransfer.item(minter.address, [sp.record(to_=bob.address, token_id=token_id, amount=1)])]).run(sender=minter, valid=False)
+
+    scenario.p("Minter updates operators")
+    scenario += fa2.update_operators([sp.variant('add_operator', sp.record(owner=minter.address,operator=auction_house.address,token_id=token_id))]).run(sender=minter)
+    
+    scenario.p("Minter creates auction")
+    scenario += auction_house.create_auction(sp.record(auction_id=auction_id, token_address=fa2.address, token_id=token_id, token_amount=sp.nat(1),  end_timestamp=sp.timestamp(60*60),  bid_amount=sp.mutez(100000))).run(sender=minter, now=sp.timestamp(0))
+    
+    scenario.p("No one has bid, no royalty expected...")
+    scenario += auction_house.withdraw(auction_id).run(sender=minter, now=sp.timestamp(60*60+1))
+    scenario.verify(~auction_house.data.accumulated_royalties.contains(minter.address))
+    
+    scenario.p("Minter updates operators")
+    scenario += fa2.update_operators([sp.variant('add_operator', sp.record(owner=minter.address,operator=auction_house.address,token_id=token_id))]).run(sender=minter)
+    
+    scenario.p("Minter creates new auction")
+    scenario += auction_house.create_auction(sp.record(auction_id=auction_id, token_address=fa2.address, token_id=token_id, token_amount=sp.nat(1),  end_timestamp=sp.timestamp(60*60),  bid_amount=sp.mutez(100000))).run(sender=minter, now=sp.timestamp(0))
+    
+    scenario += auction_house.bid(auction_id).run(sender=alice,amount=sp.tez(100), now=sp.timestamp(0))
+    
+    scenario.p("Now we have a bid, we expect royalty")
+    scenario += auction_house.withdraw(auction_id).run(sender=minter, now=sp.timestamp(60*60+1))
+    scenario.verify(auction_house.data.accumulated_royalties.contains(minter.address))
+    scenario.verify_equal(auction_house.data.accumulated_royalties[minter.address],sp.mutez(5005858))
+    
+    scenario.p("Only minter can collect royalties")
+    scenario += auction_house.collect_royalties(bob.address).run(sender=bob, valid=False)
+    scenario += auction_house.collect_royalties(minter.address).run(sender=minter, valid=True)
+    scenario.verify(~auction_house.data.accumulated_royalties.contains(minter.address))
+    
+    
+    scenario.p("Only royalty recipient can update _own_ recipient")
+    scenario += auction_house.update_royalty_recipient(sp.record(fa2_address=fa2.address, new_recipient=bob.address, token_id=token_id)).run(sender=bob, valid=False)
+    
+    scenario += auction_house.update_royalty_recipient(sp.record(fa2_address=fa2.address, new_recipient=bob.address, token_id=sp.nat(0))).run(sender=bob, valid=False)
+    
+    scenario += auction_house.update_royalty_recipient(sp.record(fa2_address=fa2.address, new_recipient=bob.address, token_id=sp.nat(0))).run(sender=minter, valid=False)
+    
+    
+    scenario += auction_house.update_royalty_recipient(sp.record(fa2_address=fa2.address, new_recipient=bob.address, token_id=token_id)).run(sender=minter, valid=True)
+    
+    scenario += auction_house.update_royalty_recipient(sp.record(fa2_address=fa2.address, new_recipient=alice.address, token_id=token_id)).run(sender=minter, valid=False)
